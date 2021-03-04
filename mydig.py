@@ -1,4 +1,4 @@
-import os, socket, sys, time, timeit 
+import os, socket, sys, time, timeit
 import dns.query, dns.message, dns.rdatatype, dns.rdataclass
 from datetime import date
 
@@ -21,13 +21,20 @@ m_root = ["m.root-servers.net", "202.12.27.33", 	"2001:dc3::35" 			"WIDE Project
 # ---------- Constants ----------
 A_RECORD = int(dns.rdatatype.A)
 CNAME_RECORD = int(dns.rdatatype.CNAME)
+NS_RECORD = int(dns.rdatatype.NS)
 RESOLVE_CNAME = True
 PRINT_TO_FILE = False
+first_question = ""
 
 		
-def formatted_resp(resp, elapsed):
-	output = """QUESTION SECTION:\n{}\n\nANSWER SECTION:\n{}\n\nQuery time: {} msec\nWHEN: {} {} {}""".format(
-		resp.question[0], resp.answer[0], elapsed * 1000, date.today(), time.strftime('%H:%M:%S'), time.tzname[0])
+def formatted_resp(answer, question, elapsed):
+	output = """QUESTION SECTION:\n{}\n\nANSWER SECTION:\n{}\n\nQuery time: {:.1f} msec\nWHEN: {} {} {}""".format(
+		question, answer, elapsed * 1000, date.today(), time.strftime('%H:%M:%S'), time.tzname[0])
+	return output
+
+def formatted_resp_no_answer(resp, elapsed):
+	output = """QUESTION SECTION:\n{}\n\nANSWER SECTION:\n{}\n\nQuery time: {:.1f} msec\nWHEN: {} {} {}""".format(
+		resp.question[0], resp.answer, elapsed * 1000, date.today(), time.strftime('%H:%M:%S'), time.tzname[0])
 	return output
 
 def print_to_output_file(output, domain_name):
@@ -39,57 +46,65 @@ def print_to_output_file(output, domain_name):
 
 
 def generate_query(domain_name):
-	query = dns.message.make_query(qname = domain_name, rdtype = dns.rdatatype.ANY)
+	query = dns.message.make_query(qname = domain_name, rdtype = dns.rdatatype.A)
 	return query
 
-def resolve_request(domain_name):
+def resolve_request(domain_name, print_resp, query_ip, time_start = 0, initial = False):
+	global first_question
 	question = generate_query(domain_name)
-	where = a_root[1]	# ipv4 of verisign root server
-	timeout = 20
-
-	time_start = time.process_time()	# begin timing query 
-	(resp, tcp) = dns.query.udp_with_fallback(q = question, where = where, timeout = timeout, ignore_trailing = True)
-
-	while(resp.additional != [] ):	# keep making requests until an answer or max attempts exhausted
-		additional = resp.additional
-		for entry in additional:
-			if entry.rdtype == A_RECORD:	# use the first available ipv4 address from additional section
-					where = str(entry[0])	# as the next where parameter 
-					break
+	where = query_ip	# ipv4 of verisign root server
+	timeout = 10	
+	try:
+		if(time_start == 0):
+			time_start = time.process_time()	# begin timing query, alternative: time.time() 
 		(resp, tcp) = dns.query.udp_with_fallback(q = question, where = where, timeout = timeout, ignore_trailing = True)
+		
+		if(initial):							# if this is the initial request, log input
+			first_question = resp.question[0]
 
+		while(resp.additional != [] and resp.answer == []):		# keep making requests until an answer or no additional
+			additional = resp.additional
+			for entry in additional:
+				if entry.rdtype == A_RECORD:	# use the first available ipv4 address from additional section
+						where = str(entry[0])	# as the next where parameter 
+						break
+			(resp, tcp) = dns.query.udp_with_fallback(q = question, where = where, timeout = timeout, ignore_trailing = True)
+		
+		if(resp.answer):
+			for a in resp.answer:
+				if(a.rdtype == CNAME_RECORD and RESOLVE_CNAME):	
+					resolve_request(str(a[0]), True, query_ip, time.process_time() - time_start)
+					break
+				elif(a.rdtype == A_RECORD and print_resp):
+					time_end = time.process_time()			# end timer
+					elapsed = time_end - time_start			# calculate msec since first query
+					output = formatted_resp(a, first_question, elapsed)	# print A record
+					print(output)
+					break
+		elif(resp.authority[0].rdtype == NS_RECORD):	# resolve NS record if no answer
+				ns_resp = resolve_request(str(resp.authority[0][0]), False, a_root[1])
+				new_ip = ""
+				for entry in ns_resp.answer:
+					if entry.rdtype == A_RECORD:	# use the first available ipv4 address from additional section
+						new_ip = str(entry[0])		# as the next where parameter 
+						break
+				resolve_request(domain_name, True, new_ip, time.process_time() - time_start)
 
-	time_end = time.process_time()	# end timer
-	elapsed = time_end - time_start	# calculate msec since first query
-
-	if(resp.answer[0].rdtype == CNAME_RECORD and RESOLVE_CNAME):	# if enabled handle CNAME resolution via recursive call
-		# print("CNAME returned, resolving CNAME...")
-		resolve_request(str(resp.answer[0][0]))
-	else:
-		output = formatted_resp(resp, elapsed)	# get the formatted output
-		print(output)	
-
-
-	if(PRINT_TO_FILE):
-		print_to_output_file(output, domain_name) 
+		if(PRINT_TO_FILE):
+			print_to_output_file(output, domain_name) 
 	
+# TODO: Convert mydig_output to pdf]
+	except BlockingIOError:
+		print("A non-blocking socket operation could not be completed immediately")
+	except dns.exception.Timeout:
+		print("The DNS operation timed out.")
 
-# TODO: suss out why timing could return 0, is the machine caching? The msec time seems the same for all sites too....
-# TODO: Convert mydig_output to pdf
-	return
+	return resp
 
-
-	# rr = resp.additional[1]
-	# print(rr.name)
-	# print(rr.ttl)
-	# print(dns.rdataclass.to_text(rr.rdclass))
-	# print(dns.rdatatype.to_text(rr.rdtype))
-	
-	# time.time() for part 2 time testing
 	#  matplotlib for part b
 
 def main():
-	resolve_request(str(sys.argv[1]))
+	resolve_request(str(sys.argv[1]), True, a_root[1], 0,True)
 
 
 
